@@ -9,6 +9,10 @@
 | `web/` | React 화면. 개발 서버(Vite)가 `/api` 요청을 API 서버로 전달(proxy)합니다. |
 | `api/` | Express 서버. 할 일을 DB에 읽고 씁니다. |
 | `api/db/schema.sql` | 테이블 생성 SQL |
+| `deploy/` | VM 배포용 설정 (systemd, Nginx) |
+
+- **개발 실행** (Vite 개발 서버): 아래 1~3번
+- **VM 배포** (Nginx + systemd): [VM에 배포하기](#vm에-배포하기-nginx--systemd)
 
 ## 필요 환경
 
@@ -87,3 +91,107 @@ npm run dev
 - **`permission denied for schema public`**: DB를 만들 때 `OWNER todo_user` 를 빠뜨렸는지 확인하세요.
   `sudo -u postgres psql -c "ALTER DATABASE todo_db OWNER TO todo_user;"`
 - **웹 화면에 `요청 실패 (500)` 또는 `(502)`**: API 서버(`npm run dev` in `api/`)가 켜져 있는지 확인하세요.
+
+---
+
+# VM에 배포하기 (Nginx + systemd)
+
+```
+[브라우저] → Nginx (:80)
+              ├─ /      → 빌드된 웹 파일 (/var/www/todo-app)
+              └─ /api/  → API (:3000, systemd 서비스 todo-api) → PostgreSQL (:5432)
+```
+
+개발 실행과 달리 Vite 개발 서버를 쓰지 않고, 빌드한 정적 파일을 Nginx 가 제공합니다.
+`/api` 전달도 Nginx 가 합니다.
+
+> 80번 포트를 다른 프로그램(예: kind 클러스터)이 쓰고 있으면 Nginx 가 뜨지 않습니다.
+> `sudo ss -ltnp | grep :80` 으로 확인하세요.
+
+## 1. 패키지 설치
+
+```bash
+sudo apt update
+sudo apt install -y nginx postgresql nodejs npm
+sudo systemctl enable --now postgresql nginx    # 부팅 시 자동 시작
+```
+
+## 2. DB와 계정 만들기
+
+위의 [1. DB와 전용 계정 만들기](#1-db와-전용-계정-만들기-처음-한-번) 와 같습니다.
+
+## 3. 저장소 받기
+
+```bash
+mkdir -p ~/deploy && cd ~/deploy
+git clone https://github.com/jjh970830-beep/todo-app.git
+cd todo-app
+```
+
+## 4. API 준비
+
+```bash
+cd ~/deploy/todo-app/api
+npm ci --omit=dev          # 실행에 필요한 패키지만 설치 (nodemon 제외)
+cp .env.example .env       # PGPASSWORD 수정
+npm run db:init
+```
+
+## 5. API 를 systemd 서비스로 등록
+
+`deploy/todo-api.service` 의 `User`, `WorkingDirectory` 가 내 환경과 맞는지 확인한 뒤:
+
+```bash
+sudo cp ~/deploy/todo-app/deploy/todo-api.service /etc/systemd/system/
+sudo systemctl daemon-reload                 # 새 서비스 파일 읽기
+sudo systemctl enable --now todo-api         # 지금 시작 + 부팅 시 자동 시작
+systemctl status todo-api                    # active (running) 이면 성공
+journalctl -u todo-api -f                    # 로그 보기 (Ctrl+C 로 나가기)
+```
+
+## 6. 웹 빌드
+
+```bash
+cd ~/deploy/todo-app/web
+npm ci
+npm run build                                # dist/ 폴더 생성
+sudo mkdir -p /var/www/todo-app
+sudo cp -r dist/. /var/www/todo-app/
+```
+
+`/home/lab` 은 Nginx(www-data 사용자)가 읽을 수 없어서 `/var/www` 로 복사합니다.
+
+## 7. Nginx 설정
+
+```bash
+sudo cp ~/deploy/todo-app/deploy/nginx-todo-app.conf /etc/nginx/sites-available/todo-app
+sudo ln -sf /etc/nginx/sites-available/todo-app /etc/nginx/sites-enabled/todo-app
+sudo rm -f /etc/nginx/sites-enabled/default  # 기본 페이지 끄기
+sudo nginx -t                                # 설정 문법 검사
+sudo systemctl reload nginx
+```
+
+## 8. 확인
+
+```bash
+curl localhost/api/todos                     # [] 또는 할 일 목록 JSON
+```
+
+브라우저: VS Code 아래 패널 **포트(PORTS)** 탭 → **포트 전달** → `80` 입력 → 지구본 아이콘으로 열기
+
+재부팅 확인:
+
+```bash
+sudo reboot
+# 다시 접속한 뒤
+systemctl is-active postgresql todo-api nginx  # 세 줄 모두 active
+curl localhost/api/todos
+```
+
+## 코드 업데이트 후 다시 배포
+
+```bash
+cd ~/deploy/todo-app && git pull
+cd api && npm ci --omit=dev && sudo systemctl restart todo-api
+cd ../web && npm ci && npm run build && sudo cp -r dist/. /var/www/todo-app/
+```

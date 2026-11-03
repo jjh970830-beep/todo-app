@@ -10,9 +10,11 @@
 | `api/` | Express 서버. 할 일을 DB에 읽고 씁니다. |
 | `api/db/schema.sql` | 테이블 생성 SQL |
 | `deploy/` | VM 배포용 설정 (systemd, Nginx) |
+| `docker-compose.yml` | Docker 로 3티어 한 번에 실행 (`api/Dockerfile`, `web/Dockerfile`) |
 
 - **개발 실행** (Vite 개발 서버): 아래 1~3번
 - **VM 배포** (Nginx + systemd): [VM에 배포하기](#vm에-배포하기-nginx--systemd)
+- **Docker 실행** (docker compose): [Docker로 실행하기](#docker로-실행하기-docker-compose)
 
 ## 필요 환경
 
@@ -195,3 +197,59 @@ cd ~/deploy/todo-app && git pull
 cd api && npm ci --omit=dev && sudo systemctl restart todo-api
 cd ../web && npm ci && npm run build && sudo cp -r dist/. /var/www/todo-app/
 ```
+
+---
+
+# Docker로 실행하기 (docker compose)
+
+```
+[브라우저] → web 컨테이너 (Nginx, :80)
+              ├─ /      → 빌드된 웹 파일
+              └─ /api/  → api 컨테이너 (:3000) → db 컨테이너 (PostgreSQL, :5432)
+                                                    └─ 데이터: 볼륨 todo-app_db-data
+```
+
+밖으로 열린 포트는 web 의 80 하나뿐이고, api 와 db 는 컨테이너끼리만 통신합니다.
+
+## 1. VM 에 직접 띄운 서비스 끄기 (포트 충돌 방지)
+
+80, 5432 번 포트를 VM 배포 때 띄운 서비스가 쓰고 있으면 컨테이너가 뜨지 않습니다.
+
+```bash
+sudo systemctl disable --now nginx todo-api postgresql postgresql@16-main
+sudo ss -ltnp | grep -E ':(80|3000|5432) '   # 아무것도 안 나오면 OK
+```
+
+> `postgresql` 은 껍데기 서비스라서, 실제 DB 프로세스인 `postgresql@16-main` 도 꺼야 합니다.
+> 다시 VM 방식으로 돌아가려면 `docker compose down` 후 `disable` 을 `enable` 로 바꿔 실행하세요.
+
+## 2. 비밀번호 설정
+
+```bash
+cp .env.example .env      # 그다음 .env 의 POSTGRES_PASSWORD 수정
+```
+
+`.env` 는 `.gitignore` 에 있어서 Git 에 올라가지 않습니다. (`api/.env` 와는 별개 파일입니다)
+
+## 3. 실행
+
+```bash
+docker compose up -d --build   # 이미지 빌드 + 백그라운드 실행
+docker compose ps              # db 가 (healthy), 셋 다 Up 이면 성공
+curl localhost/api/todos
+```
+
+테이블은 db 볼륨이 비어 있을 때(처음 실행) `api/db/schema.sql` 로 자동 생성됩니다.
+
+## 자주 쓰는 명령
+
+| 명령 | 설명 |
+|---|---|
+| `docker compose logs -f api` | api 로그 보기 (Ctrl+C 로 나가기) |
+| `docker compose down` | 컨테이너 삭제. **데이터(볼륨)는 남음** |
+| `docker compose down -v` | 컨테이너 + **데이터까지 삭제** (주의) |
+| `docker compose up -d --build` | 코드 수정 후 다시 빌드해서 실행 |
+| `docker compose exec db psql -U todo_user -d todo_db` | DB 에 직접 접속 |
+
+> 처음 실행한 뒤 `.env` 의 비밀번호를 바꾸면, 이미 만들어진 DB 의 비밀번호는 그대로라 api 가 접속에 실패합니다.
+> 실습 중이라면 `docker compose down -v` 로 데이터를 지우고 다시 `up` 하세요.

@@ -1,0 +1,50 @@
+# Todo 앱 3티어를 컨테이너로 실행합니다.
+#   docker compose up -d --build
+#
+# [브라우저] → web (Nginx, :80) ──/api──→ api (Express, :3000) → db (PostgreSQL, :5432)
+#
+# 비밀번호는 같은 폴더의 .env 파일(POSTGRES_PASSWORD)에서 읽습니다. 예시는 .env.example 참고.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: todo_db
+      POSTGRES_USER: todo_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env 파일에 POSTGRES_PASSWORD 를 설정하세요}
+    volumes:
+      # DB 데이터를 이름 있는 볼륨에 저장 → down 했다가 up 해도 남음 (down -v 하면 삭제)
+      - db-data:/var/lib/postgresql/data
+      # 볼륨이 비어 있을 때(처음 실행)만 이 SQL 로 테이블을 만듦
+      - ./api/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U todo_user -d todo_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    environment:
+      PORT: 3000
+      PGHOST: db              # 서비스 이름으로 db 컨테이너에 접속
+      PGPORT: 5432
+      PGDATABASE: todo_db
+      PGUSER: todo_user
+      PGPASSWORD: ${POSTGRES_PASSWORD:?.env 파일에 POSTGRES_PASSWORD 를 설정하세요}
+    depends_on:
+      db:
+        condition: service_healthy   # DB 가 접속을 받을 수 있을 때 시작
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    ports:
+      - "80:80"               # 밖으로 여는 건 web 하나뿐 (api, db 는 컨테이너끼리만 통신)
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  db-data:
